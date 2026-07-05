@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Numeric, Date, Text, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, Numeric, Date, Text, ForeignKey, UniqueConstraint
 from sqlalchemy.sql import func
 from database import Base
 
@@ -6,7 +6,7 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
-    username = Column(String(100), nullable=True)   # ← новое поле
+    username = Column(String(100), nullable=True)
     email = Column(String(255), unique=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
     role = Column(String(20), default="user")
@@ -38,3 +38,18 @@ class GameGenre(Base):
 
     game_id = Column(Integer, ForeignKey("games.id", ondelete="CASCADE"), primary_key=True)
     genre_id = Column(Integer, ForeignKey("genres.id", ondelete="CASCADE"), primary_key=True)
+
+class Review(Base):
+    __tablename__ = "reviews"
+
+    id = Column(Integer, primary_key=True, index=True)
+    game_id = Column(Integer, ForeignKey("games.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    rating = Column(Integer, nullable=False)
+    text = Column(Text)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Уникальность: один пользователь — один отзыв к игре
+    __table_args__ = (
+        UniqueConstraint('game_id', 'user_id', name='unique_game_user_review'),
+    )

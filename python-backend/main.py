@@ -19,7 +19,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 SECRET_KEY = os.getenv("JWT_SECRET")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = 1440  # 24 часа для удобства
 
 # ----- Зависимости БД и безопасности -----
 def get_db():
@@ -69,7 +69,7 @@ class GameBase(BaseModel):
     description: str | None = None
     price: float
     cover_url: str | None = None
-    release_date: str | None = None   # принимаем строку YYYY-MM-DD
+    release_date: str | None = None
     developer: str | None = None
     publisher: str | None = None
     genre_ids: list[int] = []
@@ -77,18 +77,45 @@ class GameBase(BaseModel):
 class GameCreate(GameBase):
     pass
 
+class GameUpdate(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    price: float | None = None
+    cover_url: str | None = None
+    release_date: str | None = None
+    developer: str | None = None
+    publisher: str | None = None
+    genre_ids: list[int] | None = None
+
 class GameOut(BaseModel):
     id: int
     title: str
     description: str | None = None
     price: float
     cover_url: str | None = None
-    release_date: date | None = None   # возвращаем как date (не строку)
+    release_date: date | None = None
     developer: str | None = None
     publisher: str | None = None
     genre_ids: list[int] = []
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+    class Config:
+        from_attributes = True
+
+# Схемы для отзывов
+class ReviewCreate(BaseModel):
+    rating: int = 5   # 1–5
+    text: str | None = None
+
+class ReviewOut(BaseModel):
+    id: int
+    game_id: int
+    user_id: int
+    username: str | None = None   # добавим имя пользователя
+    rating: int
+    text: str | None = None
+    created_at: datetime
 
     class Config:
         from_attributes = True
@@ -144,7 +171,7 @@ def create_game(game: GameCreate, db: Session = Depends(get_db), current_user: m
         description=game.description,
         price=game.price,
         cover_url=game.cover_url,
-        release_date=game.release_date,   # SQLAlchemy преобразует строку в date
+        release_date=game.release_date,
         developer=game.developer,
         publisher=game.publisher,
     )
@@ -157,3 +184,95 @@ def create_game(game: GameCreate, db: Session = Depends(get_db), current_user: m
     db.commit()
     db.refresh(new_game)
     return new_game
+
+@app.put("/api/games/{game_id}", response_model=GameOut)
+def update_game(game_id: int, game: GameUpdate, db: Session = Depends(get_db), current_user: models.User = Depends(get_admin_user)):
+    db_game = db.query(models.Game).filter(models.Game.id == game_id).first()
+    if not db_game:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    update_data = game.model_dump(exclude_unset=True)
+    genre_ids = update_data.pop("genre_ids", None)
+
+    for key, value in update_data.items():
+        setattr(db_game, key, value)
+
+    if genre_ids is not None:
+        db.query(models.GameGenre).filter(models.GameGenre.game_id == game_id).delete()
+        for gid in genre_ids:
+            genre = db.query(models.Genre).filter(models.Genre.id == gid).first()
+            if genre:
+                db.add(models.GameGenre(game_id=game_id, genre_id=gid))
+
+    db.commit()
+    db.refresh(db_game)
+    return db_game
+
+@app.delete("/api/games/{game_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_game(game_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_admin_user)):
+    db_game = db.query(models.Game).filter(models.Game.id == game_id).first()
+    if not db_game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    db.query(models.GameGenre).filter(models.GameGenre.game_id == game_id).delete()
+    db.delete(db_game)
+    db.commit()
+    return None
+
+# ----- Отзывы -----
+@app.post("/api/games/{game_id}/reviews", status_code=status.HTTP_201_CREATED, response_model=ReviewOut)
+def create_review(game_id: int, review: ReviewCreate, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # Проверяем, существует ли игра
+    game = db.query(models.Game).filter(models.Game.id == game_id).first()
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    # Проверяем, не оставлял ли пользователь уже отзыв на эту игру
+    existing = db.query(models.Review).filter(
+        models.Review.game_id == game_id,
+        models.Review.user_id == current_user.id
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="You have already reviewed this game")
+
+    new_review = models.Review(
+        game_id=game_id,
+        user_id=current_user.id,
+        rating=review.rating,
+        text=review.text
+    )
+    db.add(new_review)
+    db.commit()
+    db.refresh(new_review)
+
+    # Добавляем имя пользователя для ответа (в модели его нет, но можем достать)
+    return {
+        "id": new_review.id,
+        "game_id": new_review.game_id,
+        "user_id": new_review.user_id,
+        "username": current_user.username or current_user.email,
+        "rating": new_review.rating,
+        "text": new_review.text,
+        "created_at": new_review.created_at
+    }
+
+@app.get("/api/games/{game_id}/reviews", response_model=list[ReviewOut])
+def get_reviews(game_id: int, db: Session = Depends(get_db)):
+    game = db.query(models.Game).filter(models.Game.id == game_id).first()
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    reviews = db.query(models.Review).filter(models.Review.game_id == game_id).order_by(models.Review.created_at.desc()).all()
+    result = []
+    for r in reviews:
+        user = db.query(models.User).filter(models.User.id == r.user_id).first()
+        username = user.username or user.email if user else "Unknown"
+        result.append({
+            "id": r.id,
+            "game_id": r.game_id,
+            "user_id": r.user_id,
+            "username": username,
+            "rating": r.rating,
+            "text": r.text,
+            "created_at": r.created_at
+        })
+    return result
