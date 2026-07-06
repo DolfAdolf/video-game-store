@@ -19,7 +19,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 SECRET_KEY = os.getenv("JWT_SECRET")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 1440  # 24 часа для удобства
+ACCESS_TOKEN_EXPIRE_MINUTES = 1440
 
 # ----- Зависимости БД и безопасности -----
 def get_db():
@@ -103,19 +103,37 @@ class GameOut(BaseModel):
     class Config:
         from_attributes = True
 
-# Схемы для отзывов
 class ReviewCreate(BaseModel):
-    rating: int = 5   # 1–5
+    rating: int = 5
     text: str | None = None
 
 class ReviewOut(BaseModel):
     id: int
     game_id: int
     user_id: int
-    username: str | None = None   # добавим имя пользователя
+    username: str | None = None
     rating: int
     text: str | None = None
     created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+# Схемы для корзины
+class CartItemCreate(BaseModel):
+    game_id: int
+    quantity: int = 1
+
+class CartItemUpdate(BaseModel):
+    quantity: int
+
+class CartItemOut(BaseModel):
+    id: int
+    game_id: int
+    title: str | None = None
+    price: float | None = None
+    cover_url: str | None = None
+    quantity: int
 
     class Config:
         from_attributes = True
@@ -221,12 +239,10 @@ def delete_game(game_id: int, db: Session = Depends(get_db), current_user: model
 # ----- Отзывы -----
 @app.post("/api/games/{game_id}/reviews", status_code=status.HTTP_201_CREATED, response_model=ReviewOut)
 def create_review(game_id: int, review: ReviewCreate, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    # Проверяем, существует ли игра
     game = db.query(models.Game).filter(models.Game.id == game_id).first()
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
 
-    # Проверяем, не оставлял ли пользователь уже отзыв на эту игру
     existing = db.query(models.Review).filter(
         models.Review.game_id == game_id,
         models.Review.user_id == current_user.id
@@ -244,7 +260,6 @@ def create_review(game_id: int, review: ReviewCreate, db: Session = Depends(get_
     db.commit()
     db.refresh(new_review)
 
-    # Добавляем имя пользователя для ответа (в модели его нет, но можем достать)
     return {
         "id": new_review.id,
         "game_id": new_review.game_id,
@@ -276,3 +291,99 @@ def get_reviews(game_id: int, db: Session = Depends(get_db)):
             "created_at": r.created_at
         })
     return result
+
+# ----- Корзина -----
+@app.get("/api/cart", response_model=list[CartItemOut])
+def get_cart(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    items = db.query(models.CartItem).filter(models.CartItem.user_id == current_user.id).all()
+    result = []
+    for item in items:
+        game = db.query(models.Game).filter(models.Game.id == item.game_id).first()
+        result.append({
+            "id": item.id,
+            "game_id": item.game_id,
+            "title": game.title if game else "Unknown",
+            "price": float(game.price) if game else 0,
+            "cover_url": game.cover_url if game else None,
+            "quantity": item.quantity
+        })
+    return result
+
+@app.post("/api/cart/items", status_code=status.HTTP_201_CREATED, response_model=CartItemOut)
+def add_to_cart(item: CartItemCreate, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    game = db.query(models.Game).filter(models.Game.id == item.game_id).first()
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    existing = db.query(models.CartItem).filter(
+        models.CartItem.user_id == current_user.id,
+        models.CartItem.game_id == item.game_id
+    ).first()
+    if existing:
+        existing.quantity += item.quantity
+        db.commit()
+        db.refresh(existing)
+        return {
+            "id": existing.id,
+            "game_id": existing.game_id,
+            "title": game.title,
+            "price": float(game.price),
+            "cover_url": game.cover_url,
+            "quantity": existing.quantity
+        }
+
+    new_item = models.CartItem(
+        user_id=current_user.id,
+        game_id=item.game_id,
+        quantity=item.quantity
+    )
+    db.add(new_item)
+    db.commit()
+    db.refresh(new_item)
+    return {
+        "id": new_item.id,
+        "game_id": new_item.game_id,
+        "title": game.title,
+        "price": float(game.price),
+        "cover_url": game.cover_url,
+        "quantity": new_item.quantity
+    }
+
+@app.put("/api/cart/items/{item_id}", response_model=CartItemOut)
+def update_cart_item(item_id: int, update: CartItemUpdate, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    cart_item = db.query(models.CartItem).filter(
+        models.CartItem.id == item_id,
+        models.CartItem.user_id == current_user.id
+    ).first()
+    if not cart_item:
+        raise HTTPException(status_code=404, detail="Cart item not found")
+
+    if update.quantity <= 0:
+        db.delete(cart_item)
+        db.commit()
+        raise HTTPException(status_code=204, detail="Item removed")
+
+    cart_item.quantity = update.quantity
+    db.commit()
+    db.refresh(cart_item)
+    game = db.query(models.Game).filter(models.Game.id == cart_item.game_id).first()
+    return {
+        "id": cart_item.id,
+        "game_id": cart_item.game_id,
+        "title": game.title if game else "Unknown",
+        "price": float(game.price) if game else 0,
+        "cover_url": game.cover_url if game else None,
+        "quantity": cart_item.quantity
+    }
+
+@app.delete("/api/cart/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_cart_item(item_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    cart_item = db.query(models.CartItem).filter(
+        models.CartItem.id == item_id,
+        models.CartItem.user_id == current_user.id
+    ).first()
+    if not cart_item:
+        raise HTTPException(status_code=404, detail="Cart item not found")
+    db.delete(cart_item)
+    db.commit()
+    return None

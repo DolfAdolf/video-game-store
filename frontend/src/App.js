@@ -16,11 +16,25 @@ function App() {
   const [token, setToken] = useState(localStorage.getItem("token") || "");
   const [games, setGames] = useState([]);
   const [role, setRole] = useState("");
+  const [cartCount, setCartCount] = useState(0);
 
   const fetchGames = async () => {
     try {
       const { data } = await API.get("/games");
       setGames(data);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const fetchCartCount = async () => {
+    if (!token) return;
+    try {
+      const { data } = await API.get("/cart", {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const total = data.reduce((sum, item) => sum + item.quantity, 0);
+      setCartCount(total);
     } catch (err) {
       console.error(err);
     }
@@ -34,8 +48,10 @@ function App() {
     if (token) {
       const payload = parseJwt(token);
       setRole(payload?.role || "user");
+      fetchCartCount();
     } else {
       setRole("");
+      setCartCount(0);
     }
   }, [token]);
 
@@ -45,9 +61,19 @@ function App() {
         <nav className="navbar navbar-expand-lg navbar-dark" style={{ background: "rgba(0,0,0,0.7)" }}>
           <div className="container">
             <Link className="navbar-brand fw-bold" to="/">🎮 Game Store</Link>
-            <div className="d-flex gap-2">
+            <div className="d-flex gap-2 align-items-center">
               {role === "admin" && (
                 <Link className="btn btn-outline-warning" to="/admin">Админ-панель</Link>
+              )}
+              {token && (
+                <Link to="/cart" className="btn btn-outline-info position-relative">
+                  🛒
+                  {cartCount > 0 && (
+                    <span className="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger">
+                      {cartCount}
+                    </span>
+                  )}
+                </Link>
               )}
               {!token ? (
                 <>
@@ -65,10 +91,11 @@ function App() {
 
         <div className="container flex-grow-1 py-4">
           <Routes>
-            <Route path="/" element={<Home games={games} />} />
+            <Route path="/" element={<Home games={games} token={token} fetchCartCount={fetchCartCount} />} />
             <Route path="/register" element={<Register setToken={setToken} />} />
             <Route path="/login" element={<Login setToken={setToken} />} />
-            <Route path="/games/:id" element={<GameDetail token={token} />} />
+            <Route path="/games/:id" element={<GameDetail token={token} fetchCartCount={fetchCartCount} />} />
+            <Route path="/cart" element={<Cart token={token} fetchCartCount={fetchCartCount} />} />
             {role === "admin" && (
               <Route path="/admin" element={<AdminPanel token={token} fetchGames={fetchGames} />} />
             )}
@@ -84,7 +111,22 @@ function App() {
 }
 
 // ----- Главная страница -----
-function Home({ games }) {
+function Home({ games, token, fetchCartCount }) {
+  const addToCart = async (gameId) => {
+    if (!token) {
+      alert("Войдите, чтобы добавить игру в корзину");
+      return;
+    }
+    try {
+      await API.post("/cart/items", { game_id: gameId, quantity: 1 }, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      fetchCartCount();
+    } catch (err) {
+      alert(err.response?.data?.detail || "Ошибка добавления в корзину");
+    }
+  };
+
   return (
     <div>
       <h2 className="text-white mb-4">🔥 Популярные игры</h2>
@@ -97,23 +139,26 @@ function Home({ games }) {
         <div className="row">
           {games.map((game) => (
             <div key={game.id} className="col-md-4 col-lg-3 mb-4">
-              <Link to={`/games/${game.id}`} className="text-decoration-none">
-                <div className="card h-100 border-0 shadow-lg" style={{ background: "rgba(255,255,255,0.1)", backdropFilter: "blur(10px)", color: "white" }}>
+              <div className="card h-100 border-0 shadow-lg" style={{ background: "rgba(255,255,255,0.1)", backdropFilter: "blur(10px)", color: "white" }}>
+                <Link to={`/games/${game.id}`}>
                   <img
                     src={game.cover_url || "https://via.placeholder.com/300x200?text=No+Cover"}
                     className="card-img-top"
                     alt={game.title}
                     style={{ height: "200px", objectFit: "cover" }}
                   />
-                  <div className="card-body">
+                </Link>
+                <div className="card-body d-flex flex-column">
+                  <Link to={`/games/${game.id}`} className="text-decoration-none text-white">
                     <h5 className="card-title fw-bold">{game.title}</h5>
-                    <p className="card-text small text-white-50">{game.description?.slice(0, 80)}...</p>
-                    <p className="card-text">
-                      <span className="badge bg-success fs-6">${game.price}</span>
-                    </p>
-                  </div>
+                  </Link>
+                  <p className="card-text small text-white-50">{game.description?.slice(0, 80)}...</p>
+                  <p className="card-text mt-auto">
+                    <span className="badge bg-success fs-6">${game.price}</span>
+                  </p>
+                  <button className="btn btn-sm btn-outline-light mt-2" onClick={() => addToCart(game.id)}>🛒 В корзину</button>
                 </div>
-              </Link>
+              </div>
             </div>
           ))}
         </div>
@@ -207,7 +252,7 @@ function Login({ setToken }) {
 }
 
 // ----- Страница игры -----
-function GameDetail({ token }) {
+function GameDetail({ token, fetchCartCount }) {
   const { id } = useParams();
   const [game, setGame] = useState(null);
   const [reviews, setReviews] = useState([]);
@@ -255,6 +300,22 @@ function GameDetail({ token }) {
     }
   };
 
+  const addToCart = async () => {
+    if (!token) {
+      setMessage("Войдите, чтобы добавить игру в корзину");
+      return;
+    }
+    try {
+      await API.post("/cart/items", { game_id: game.id, quantity: 1 }, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      fetchCartCount();
+      setMessage("Игра добавлена в корзину!");
+    } catch (err) {
+      setMessage(err.response?.data?.detail || "Ошибка");
+    }
+  };
+
   if (!game) return <p className="text-white">Загрузка...</p>;
 
   const avgRating = reviews.length > 0
@@ -278,6 +339,7 @@ function GameDetail({ token }) {
             <li><strong>Дата выхода:</strong> {game.release_date || "—"}</li>
             {avgRating && <li><strong>Рейтинг:</strong> ⭐ {avgRating} ({reviews.length} отзывов)</li>}
           </ul>
+          <button className="btn btn-success" onClick={addToCart}>🛒 В корзину</button>
         </div>
       </div>
 
@@ -327,19 +389,101 @@ function GameDetail({ token }) {
   );
 }
 
-// ----- Админ-панель (без изменений, но оставлю для полноты) -----
+// ----- Корзина -----
+function Cart({ token, fetchCartCount }) {
+  const [items, setItems] = useState([]);
+  const [message, setMessage] = useState("");
+
+  const fetchCart = async () => {
+    try {
+      const { data } = await API.get("/cart", {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setItems(data);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  useEffect(() => {
+    if (token) fetchCart();
+  }, [token]);
+
+  const updateQuantity = async (itemId, newQty) => {
+    try {
+      if (newQty <= 0) {
+        await API.delete(`/cart/items/${itemId}`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+      } else {
+        await API.put(`/cart/items/${itemId}`, { quantity: newQty }, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+      }
+      fetchCart();
+      fetchCartCount();
+    } catch (err) {
+      setMessage(err.response?.data?.detail || "Ошибка обновления");
+    }
+  };
+
+  const removeItem = async (itemId) => {
+    try {
+      await API.delete(`/cart/items/${itemId}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      fetchCart();
+      fetchCartCount();
+    } catch (err) {
+      setMessage(err.response?.data?.detail || "Ошибка удаления");
+    }
+  };
+
+  const total = items.reduce((sum, item) => sum + item.price * item.quantity, 0).toFixed(2);
+
+  if (!token) return <p className="text-white">Войдите, чтобы увидеть корзину.</p>;
+
+  return (
+    <div className="text-white">
+      <h2>🛒 Корзина</h2>
+      {message && <div className="alert alert-info">{message}</div>}
+      {items.length === 0 ? (
+        <p>Корзина пуста.</p>
+      ) : (
+        <>
+          <div className="list-group mb-3">
+            {items.map(item => (
+              <div key={item.id} className="list-group-item d-flex justify-content-between align-items-center" style={{ background: "rgba(255,255,255,0.1)" }}>
+                <div className="d-flex align-items-center gap-3">
+                  <img src={item.cover_url || "https://via.placeholder.com/50x50?text=?"} alt="" style={{ width: 50, height: 50, objectFit: "cover" }} />
+                  <div>
+                    <strong>{item.title}</strong>
+                    <div>${item.price} x {item.quantity}</div>
+                  </div>
+                </div>
+                <div className="d-flex align-items-center gap-2">
+                  <button className="btn btn-sm btn-outline-light" onClick={() => updateQuantity(item.id, item.quantity - 1)}>−</button>
+                  <span>{item.quantity}</span>
+                  <button className="btn btn-sm btn-outline-light" onClick={() => updateQuantity(item.id, item.quantity + 1)}>+</button>
+                  <button className="btn btn-sm btn-outline-danger" onClick={() => removeItem(item.id)}>🗑️</button>
+                </div>
+              </div>
+            ))}
+          </div>
+          <h4>Итого: ${total}</h4>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ----- Админ-панель -----
 function AdminPanel({ token, fetchGames }) {
   const [games, setGames] = useState([]);
   const [editingGame, setEditingGame] = useState(null);
   const [form, setForm] = useState({
-    title: "",
-    description: "",
-    price: "",
-    release_date: "",
-    developer: "",
-    publisher: "",
-    cover_url: "",
-    genre_ids: [],
+    title: "", description: "", price: "", release_date: "",
+    developer: "", publisher: "", cover_url: "", genre_ids: [],
   });
   const [message, setMessage] = useState("");
 
