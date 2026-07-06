@@ -110,7 +110,7 @@ function App() {
   );
 }
 
-// ----- Главная страница -----
+// ----- Главная страница с рейтингом -----
 function Home({ games, token, fetchCartCount }) {
   const addToCart = async (gameId) => {
     if (!token) {
@@ -126,6 +126,39 @@ function Home({ games, token, fetchCartCount }) {
       alert(err.response?.data?.detail || "Ошибка добавления в корзину");
     }
   };
+
+  const renderStars = (rating) => {
+  if (!rating && rating !== 0) return null;
+  const percentage = Math.min(Math.max(rating, 0), 5) / 5 * 100;
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+      <span style={{
+        position: 'relative',
+        display: 'inline-block',
+        fontSize: '1.3rem',
+        color: '#555',
+        whiteSpace: 'nowrap',
+        userSelect: 'none'
+      }}>
+        ★★★★★
+        <span style={{
+          position: 'absolute',
+          left: 0,
+          top: 0,
+          overflow: 'hidden',
+          width: `${percentage}%`,
+          color: '#ffc107',
+          whiteSpace: 'nowrap'
+        }}>
+          ★★★★★
+        </span>
+      </span>
+      <small className="text-white-50" style={{ fontSize: '0.8rem' }}>
+        {rating.toFixed(1)}
+      </small>
+    </span>
+  );
+};
 
   return (
     <div>
@@ -153,10 +186,18 @@ function Home({ games, token, fetchCartCount }) {
                     <h5 className="card-title fw-bold">{game.title}</h5>
                   </Link>
                   <p className="card-text small text-white-50">{game.description?.slice(0, 80)}...</p>
-                  <p className="card-text mt-auto">
-                    <span className="badge bg-success fs-6">${game.price}</span>
-                  </p>
-                  <button className="btn btn-sm btn-outline-light mt-2" onClick={() => addToCart(game.id)}>🛒 В корзину</button>
+                  <div className="mt-auto">
+                    <p className="card-text mb-1">
+                      <span className="badge bg-success fs-6">${game.price}</span>
+                    </p>
+                    {game.avg_rating != null && (
+                      <div className="d-flex align-items-center gap-2 mb-2">
+                        {renderStars(game.avg_rating)}
+                        <small className="text-white-50">({game.review_count})</small>
+                      </div>
+                    )}
+                    <button className="btn btn-sm btn-outline-light w-100" onClick={() => addToCart(game.id)}>🛒 В корзину</button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -337,6 +378,9 @@ function GameDetail({ token, fetchCartCount }) {
             <li><strong>Разработчик:</strong> {game.developer || "—"}</li>
             <li><strong>Издатель:</strong> {game.publisher || "—"}</li>
             <li><strong>Дата выхода:</strong> {game.release_date || "—"}</li>
+            {game.genres && game.genres.length > 0 && (
+              <li><strong>Жанры:</strong> {game.genres.map(g => g.name).join(", ")}</li>
+            )}
             {avgRating && <li><strong>Рейтинг:</strong> ⭐ {avgRating} ({reviews.length} отзывов)</li>}
           </ul>
           <button className="btn btn-success" onClick={addToCart}>🛒 В корзину</button>
@@ -453,7 +497,7 @@ function Cart({ token, fetchCartCount }) {
         <>
           <div className="list-group mb-3">
             {items.map(item => (
-              <div key={item.id} className="list-group-item d-flex justify-content-between align-items-center" style={{ background: "rgba(255,255,255,0.1)" }}>
+              <div key={item.id} className="list-group-item d-flex justify-content-between align-items-center text-white" style={{ background: "rgba(255,255,255,0.15)" }}>
                 <div className="d-flex align-items-center gap-3">
                   <img src={item.cover_url || "https://via.placeholder.com/50x50?text=?"} alt="" style={{ width: 50, height: 50, objectFit: "cover" }} />
                   <div>
@@ -477,9 +521,10 @@ function Cart({ token, fetchCartCount }) {
   );
 }
 
-// ----- Админ-панель -----
+// ----- Админ-панель с выпадающим списком жанров -----
 function AdminPanel({ token, fetchGames }) {
   const [games, setGames] = useState([]);
+  const [allGenres, setAllGenres] = useState([]);
   const [editingGame, setEditingGame] = useState(null);
   const [form, setForm] = useState({
     title: "", description: "", price: "", release_date: "",
@@ -494,7 +539,17 @@ function AdminPanel({ token, fetchGames }) {
     } catch (err) { console.error(err); }
   };
 
-  useEffect(() => { loadGames(); }, []);
+  const loadGenres = async () => {
+    try {
+      const { data } = await API.get("/genres");
+      setAllGenres(data);
+    } catch (err) { console.error(err); }
+  };
+
+  useEffect(() => {
+    loadGames();
+    loadGenres();
+  }, []);
 
   const handleChange = (e) => {
     setForm({ ...form, [e.target.name]: e.target.value });
@@ -510,6 +565,10 @@ function AdminPanel({ token, fetchGames }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (form.genre_ids.length === 0) {
+      setMessage("Выберите хотя бы один жанр");
+      return;
+    }
     try {
       const payload = {
         title: form.title,
@@ -595,6 +654,26 @@ function AdminPanel({ token, fetchGames }) {
               <div className="col-md-4 mb-3">
                 <label className="form-label">Издатель</label>
                 <input name="publisher" className="form-control" value={form.publisher} onChange={handleChange} />
+              </div>
+              <div className="col-md-4 mb-3">
+                <label className="form-label">Жанры</label>
+                <select
+                  multiple
+                  className="form-select"
+                  value={form.genre_ids.map(String)}
+                  onChange={(e) =>
+                    setForm({
+                      ...form,
+                      genre_ids: Array.from(e.target.selectedOptions, option => parseInt(option.value))
+                    })
+                  }
+                  size={5}
+                >
+                  {allGenres.map(genre => (
+                    <option key={genre.id} value={genre.id}>{genre.name}</option>
+                  ))}
+                </select>
+                <small className="text-white-50">Удерживайте Ctrl для выбора нескольких</small>
               </div>
               <div className="col-12 mb-3">
                 <label className="form-label">URL обложки</label>

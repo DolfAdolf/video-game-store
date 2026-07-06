@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
+from sqlalchemy import func as sa_func   # для агрегатных функций
 from jose import JWTError, jwt
 from pydantic import BaseModel
 
@@ -64,6 +65,14 @@ class Token(BaseModel):
     access_token: str
     token_type: str = "bearer"
 
+class GenreOut(BaseModel):
+    id: int
+    name: str
+    slug: str
+
+    class Config:
+        from_attributes = True
+
 class GameBase(BaseModel):
     title: str
     description: str | None = None
@@ -97,6 +106,26 @@ class GameOut(BaseModel):
     developer: str | None = None
     publisher: str | None = None
     genre_ids: list[int] = []
+    genres: list[GenreOut] = []
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    class Config:
+        from_attributes = True
+
+# Новая схема для списка игр с рейтингом
+class GameOutSimple(BaseModel):
+    id: int
+    title: str
+    description: str | None = None
+    price: float
+    cover_url: str | None = None
+    release_date: date | None = None
+    developer: str | None = None
+    publisher: str | None = None
+    genre_ids: list[int] = []
+    avg_rating: float | None = None      # <-- средний рейтинг
+    review_count: int = 0                # <-- количество отзывов
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -143,6 +172,10 @@ class CartItemOut(BaseModel):
 def health():
     return {"status": "ok"}
 
+@app.get("/api/genres", response_model=list[GenreOut])
+def get_genres(db: Session = Depends(get_db)):
+    return db.query(models.Genre).all()
+
 @app.post("/api/register", status_code=status.HTTP_201_CREATED)
 def register(user: UserCreate, db: Session = Depends(get_db)):
     db_user = db.query(models.User).filter(models.User.email == user.email).first()
@@ -171,16 +204,50 @@ def login(user: UserCreate, db: Session = Depends(get_db)):
     access_token = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return {"access_token": access_token}
 
-@app.get("/api/games", response_model=list[GameOut])
+# Список игр с рейтингом
+@app.get("/api/games", response_model=list[GameOutSimple])
 def get_games(db: Session = Depends(get_db)):
-    return db.query(models.Game).all()
+    games = db.query(models.Game).all()
+    result = []
+    for game in games:
+        # собираем жанры
+        gg_items = db.query(models.GameGenre).filter(models.GameGenre.game_id == game.id).all()
+        genre_ids = [gg.genre_id for gg in gg_items]
+        # вычисляем средний рейтинг и количество отзывов
+        avg_rating = db.query(sa_func.avg(models.Review.rating)).filter(models.Review.game_id == game.id).scalar()
+        review_count = db.query(sa_func.count(models.Review.id)).filter(models.Review.game_id == game.id).scalar()
+        result.append({
+            **game.__dict__,
+            "genre_ids": genre_ids,
+            "avg_rating": round(float(avg_rating), 1) if avg_rating else None,
+            "review_count": review_count or 0
+        })
+    return result
 
 @app.get("/api/games/{game_id}", response_model=GameOut)
 def get_game(game_id: int, db: Session = Depends(get_db)):
     game = db.query(models.Game).filter(models.Game.id == game_id).first()
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
-    return game
+
+    gg_items = db.query(models.GameGenre).filter(models.GameGenre.game_id == game_id).all()
+    genre_ids = [gg.genre_id for gg in gg_items]
+    genres = db.query(models.Genre).filter(models.Genre.id.in_(genre_ids)).all() if genre_ids else []
+
+    return {
+        "id": game.id,
+        "title": game.title,
+        "description": game.description,
+        "price": game.price,
+        "cover_url": game.cover_url,
+        "release_date": game.release_date,
+        "developer": game.developer,
+        "publisher": game.publisher,
+        "genre_ids": genre_ids,
+        "genres": [{"id": g.id, "name": g.name, "slug": g.slug} for g in genres],
+        "created_at": game.created_at,
+        "updated_at": game.updated_at
+    }
 
 @app.post("/api/games", status_code=status.HTTP_201_CREATED, response_model=GameOut)
 def create_game(game: GameCreate, db: Session = Depends(get_db), current_user: models.User = Depends(get_admin_user)):
@@ -201,7 +268,23 @@ def create_game(game: GameCreate, db: Session = Depends(get_db), current_user: m
             db.add(models.GameGenre(game_id=new_game.id, genre_id=genre_id))
     db.commit()
     db.refresh(new_game)
-    return new_game
+    gg_items = db.query(models.GameGenre).filter(models.GameGenre.game_id == new_game.id).all()
+    genre_ids = [gg.genre_id for gg in gg_items]
+    genres = db.query(models.Genre).filter(models.Genre.id.in_(genre_ids)).all() if genre_ids else []
+    return {
+        "id": new_game.id,
+        "title": new_game.title,
+        "description": new_game.description,
+        "price": new_game.price,
+        "cover_url": new_game.cover_url,
+        "release_date": new_game.release_date,
+        "developer": new_game.developer,
+        "publisher": new_game.publisher,
+        "genre_ids": genre_ids,
+        "genres": [{"id": g.id, "name": g.name, "slug": g.slug} for g in genres],
+        "created_at": new_game.created_at,
+        "updated_at": new_game.updated_at
+    }
 
 @app.put("/api/games/{game_id}", response_model=GameOut)
 def update_game(game_id: int, game: GameUpdate, db: Session = Depends(get_db), current_user: models.User = Depends(get_admin_user)):
@@ -224,7 +307,24 @@ def update_game(game_id: int, game: GameUpdate, db: Session = Depends(get_db), c
 
     db.commit()
     db.refresh(db_game)
-    return db_game
+
+    gg_items = db.query(models.GameGenre).filter(models.GameGenre.game_id == game_id).all()
+    genre_ids_resp = [gg.genre_id for gg in gg_items]
+    genres = db.query(models.Genre).filter(models.Genre.id.in_(genre_ids_resp)).all() if genre_ids_resp else []
+    return {
+        "id": db_game.id,
+        "title": db_game.title,
+        "description": db_game.description,
+        "price": db_game.price,
+        "cover_url": db_game.cover_url,
+        "release_date": db_game.release_date,
+        "developer": db_game.developer,
+        "publisher": db_game.publisher,
+        "genre_ids": genre_ids_resp,
+        "genres": [{"id": g.id, "name": g.name, "slug": g.slug} for g in genres],
+        "created_at": db_game.created_at,
+        "updated_at": db_game.updated_at
+    }
 
 @app.delete("/api/games/{game_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_game(game_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_admin_user)):
